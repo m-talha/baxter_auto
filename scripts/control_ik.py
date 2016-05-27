@@ -264,7 +264,7 @@ class RobotArm:
                 direction = direction+curr_ang.tolist()
 
             # print('Current: ', self.temp)
-            dirSection = np.array(direction)
+            direction = np.array(direction)
             # print('Direction: ', direction)
             resp =self.vrepScriptFunc.call('set_pose@Baxter_leftArm_target',1,[],direction,[],'')
             desired_p = self.temp + direction
@@ -315,14 +315,17 @@ class RobotArm:
         limb_joints = dict(zip(self.left._joint_names['left'], outputFloats))
         self.left.move_to_joint_positions(limb_joints)
 
-def move_to_start_pos(robot,syncErrThresh):
-    print('Moving to start position and synchronising pose...')
-    robot.reset_pos()
-    # Initial synchronisation of Baxter and V-rep
+def left_arm_sync(robot,syncErrThresh):
     while (True):
         err = robot.syncPos('left')
         if err < abs(syncErrThresh):
             break
+
+def move_to_start_pos(robot,syncErrThresh):
+    print('Moving to start position and synchronising pose...')
+    robot.reset_pos()
+    # Initial synchronisation of Baxter and V-rep
+    left_arm_sync(robot,syncErrThresh)
 
 
     print('Pose synchronised. Control of arm enabled.')
@@ -361,7 +364,7 @@ def run_control(joystick):
     delta = 0.01
     incU = 0.05
     incL = 0.01
-    syncErrThresh = 0.03
+    syncErrThresh = 0.01
     vrepZdelta = 1.08220972
 
     # Service to call functions in V-rep (e.g. set/get joint positions)
@@ -497,7 +500,7 @@ def run_control(joystick):
         terminate_process_and_children("/record")
 
 
-    thread.start_new_thread(record_data, ('test.bag',))
+    # thread.start_new_thread(record_data, ('test.bag',))
 
 
 
@@ -511,9 +514,9 @@ def run_control(joystick):
         btnPressed = False
         # inputControl()
         if kbOnly == True:
-            c = baxter_external_devices.getch(-1)
+            c = baxter_external_devices.getch(1)
             if c:
-                print('Pressed: ',c)
+                # print('Pressed: ',c)
                 recording=True
                 #catch Esc or ctrl-c
                 if c in ['\x1b', '\x03']:
@@ -535,7 +538,7 @@ def run_control(joystick):
                         cmd[0](*cmd[1])
                     else:
                         cmd[0](*cmd[1])
-                    print("command: %s" % (cmd[2],))
+                    # print("command: %s" % (cmd[2],))
 
         else:
             c = baxter_external_devices.getch()
@@ -577,7 +580,7 @@ def run_control(joystick):
             norm = np.linalg.norm(curr_jnts)
             err = math.fabs(np.linalg.norm(np.array(resp.outputFloats)-curr_jnts))
             err = err/norm
-            # print('Error: ',err)
+            print('Error: ',err)
 
             # limb_joints = dict(zip(robot.left._joint_names['left'], resp.outputFloats))
             # robot.left.set_joint_positions(limb_joints)
@@ -595,6 +598,11 @@ def run_control(joystick):
             # print 'Finish pose: ',current_p
             # print('Actual joints: ', left.joint_angles())
             # print('---------------------------------------------------------------------------------')
+
+        else:
+            print('Synching')
+            left_arm_sync(robot,syncErrThresh)
+            vrepScriptFunc.call('set_ik_mode@Baxter_leftArm_target', 1, [], [], [], '')
 
         rate.sleep()
 
