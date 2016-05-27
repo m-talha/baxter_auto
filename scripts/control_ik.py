@@ -143,6 +143,7 @@ class RobotArm:
         self.ee_mode = False
         self.vrepScriptFunc = vrepScriptFunc
         self.currPoseL = self.temp = np.array(self.left.endpoint_pose()['position']+self.left.endpoint_pose()['orientation'])
+        self.recordedPose = np.zeros(7)
 
     def syncPos(self, side):
         if side == 'left':
@@ -154,12 +155,12 @@ class RobotArm:
         resp = self.vrepScriptFunc.call('set_jnt_pos@Baxter_leftArm_target',1,[],curr_jnts,[],'')
         resp = self.vrepScriptFunc.call('get_jnt_pos@Baxter_leftArm_target',1,[],[],[],'')
         err = math.fabs(np.linalg.norm(np.array(resp.outputFloats)-curr_jnts))
-        print 'Error: ',err
-        print 'V-rep Joints: ',resp.outputFloats
-        print '---------------------------------------------------------------------------------'
+        # print 'Error: ',err
+        # print 'V-rep Joints: ',resp.outputFloats
+        # print '---------------------------------------------------------------------------------'
         curr_deg = rad_to_deg(curr_jnts)
-        print 'Actual joints: ', curr_jnts
-        print '---------------------------------------------------------------------------------'
+        # print 'Actual joints: ', curr_jnts
+        # print '---------------------------------------------------------------------------------'
 
         return err
 
@@ -171,6 +172,20 @@ class RobotArm:
 
         self.currPoseL = self.temp = np.array(limb.endpoint_pose()['position']+limb.endpoint_pose()['orientation'])
         return self.currPoseL
+
+    def getPos(self,side):
+        if side == 'left':
+            limb = self.left
+        else:
+            limb = self.right
+
+        currPos = np.array(limb.endpoint_pose()['position'] + limb.endpoint_pose()['orientation'])
+
+        return currPos
+
+    def recordPos(self,side):
+        self.recordedPose = self.getPos(side)
+        print('Recorded position: ', self.recordedPose)
 
     def command_ik(self, side, direction):
         """Use the Rethink IK service to figure out a desired joint position
@@ -271,6 +286,20 @@ class RobotArm:
             self.temp = desired_p
             # print('Desired: ', desired_p)
 
+    def auto_ik(self, side, pos, Zdelta=0):
+        """Use the Rethink IK service to figure out a desired joint position
+           This is way too slow to use in realtime. Unless I figure out why the
+           IK service takes minutes to respond, not going to use it."""
+        if side == 'left':
+            limb = self.left
+        else:
+            limb = self.right
+
+        # Change z to match v-rep difference
+        pos[2] = pos[2] + Zdelta
+        resp = self.vrepScriptFunc.call('set_tgt_pose@Baxter_leftArm_target', 1, [], pos, [], '')
+
+
     def grip_l_open(self):
         self.grip_left.open()
         self.vrepScriptFunc.call('grip@BaxterGripper',1,[0],[],[],'')
@@ -345,6 +374,22 @@ def inc_delta(inc, delta, incU, incL):
     print('New speed: ', inc)
 
     return inc
+
+def auto_move_generate_wp(robot, tgtpose):
+    currPos = np.array(robot.getPos('left'))
+    tgt = np.array(tgtpose)
+
+    safeH = 0.3
+    safeD = safeH - 0.2
+
+    wp1 = currPos
+    wp1[2] = wp1[2] + safeH
+    wp2 = tgt
+    wp2[2] = wp2[2] + safeH
+    wp3 = tgt
+    wp3[2] = wp3[2] - safeD
+
+    return wp1, wp2, wp3
 
 def run_control(joystick):
     # Initialise parameters
@@ -427,6 +472,7 @@ def run_control(joystick):
             'q': (robot.command_ik, ['left', [0, 0, inc]], "increase left z"),
             'e': (robot.command_ik, ['left', [0, 0, -inc]], "decrease left z"),
             'p': (robot.grip_l_close, [], "Gripper open/close"),
+            'r': (robot.recordPos, ['left'], "Recorded position"),
             # 'l': (robot.grip_l_open, [], "left: gripper open"),
             # 'c': (grip_left.calibrate, [], "left: gripper calibrate")
         }
@@ -449,7 +495,7 @@ def run_control(joystick):
 
 
     # Setup data recording
-    endpoint_state=EndpointState()
+    endpoint_state=EndpointState
     def on_endpoint_states(msg,endpoint_state):
         endpoint_state.header= msg.header
         endpoint_state.pose= msg.pose
@@ -512,19 +558,24 @@ def run_control(joystick):
     # while loop
     while not rospy.is_shutdown():
         btnPressed = False
+        autoMove = False
+
         # inputControl()
         if kbOnly == True:
             c = baxter_external_devices.getch(1)
             if c:
                 # print('Pressed: ',c)
-                recording=True
+                recording = True
                 #catch Esc or ctrl-c
                 if c in ['\x1b', '\x03']:
                     # terminate_process_and_children(p)
                     rospy.signal_shutdown("Example finished.")
 
                 if c == '\r':
-                    done_recording=True
+                    done_recording = True
+
+                if c == 'f':
+                    autoMove = True
 
                 # Keyboard control
                 if c in kb_b:
@@ -564,6 +615,37 @@ def run_control(joystick):
                     else:
                         print(doc)
 
+        if autoMove == True:
+            wp1, wp2, wp3 = auto_move_generate_wp(robot, robot.recordedPose)
+            print('Waypoint 1:', wp1)
+
+            robot.auto_ik('left', wp1, vrepZdelta)
+            resp = vrepScriptFunc.call('ikSuccess@Baxter_leftArm_target', 1, [], [], [], '')
+
+            # Get resulting joint positions from V-rep
+            resp = vrepScriptFunc.call('get_jnt_pos@Baxter_leftArm_target', 1, [], [], [], '')
+            # Wrap and send joint positions to Baxter
+            limb_joints = dict(zip(robot.left._joint_names['left'], resp.outputFloats))
+            robot.left.move_to_joint_positions(limb_joints)
+
+            robot.auto_ik('left', wp2, vrepZdelta)
+            resp = vrepScriptFunc.call('ikSuccess@Baxter_leftArm_target', 1, [], [], [], '')
+
+            # Get resulting joint positions from V-rep
+            resp = vrepScriptFunc.call('get_jnt_pos@Baxter_leftArm_target', 1, [], [], [], '')
+            # Wrap and send joint positions to Baxter
+            limb_joints = dict(zip(robot.left._joint_names['left'], resp.outputFloats))
+            robot.left.move_to_joint_positions(limb_joints)
+
+            robot.auto_ik('left', wp3, vrepZdelta)
+            resp = vrepScriptFunc.call('ikSuccess@Baxter_leftArm_target', 1, [], [], [], '')
+
+            # Get resulting joint positions from V-rep
+            resp = vrepScriptFunc.call('get_jnt_pos@Baxter_leftArm_target', 1, [], [], [], '')
+            # Wrap and send joint positions to Baxter
+            limb_joints = dict(zip(robot.left._joint_names['left'], resp.outputFloats))
+            robot.left.move_to_joint_positions(limb_joints)
+
         # Check if IK was a success in V-rep
         resp = vrepScriptFunc.call('ikSuccess@Baxter_leftArm_target',1,[],[],[],'')
         # print 'Ik Success: ', resp.outputInts
@@ -580,7 +662,7 @@ def run_control(joystick):
             norm = np.linalg.norm(curr_jnts)
             err = math.fabs(np.linalg.norm(np.array(resp.outputFloats)-curr_jnts))
             err = err/norm
-            print('Error: ',err)
+            # print('Error: ',err)
 
             # limb_joints = dict(zip(robot.left._joint_names['left'], resp.outputFloats))
             # robot.left.set_joint_positions(limb_joints)
